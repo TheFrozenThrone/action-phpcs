@@ -757,8 +757,8 @@ const run_on_diff_1 = __webpack_require__(522);
 async function run() {
     try {
         const files = await get_changed_file_1.getChangedFiles();
-        core.info(JSON.stringify(files, null, 2));
-        if (!files.added.length && !files.modified.length) {
+        core.info(JSON.stringify(Array.from(files.keys()), null, 2));
+        if (!files.size) {
             core.warning('No files to check, exiting...');
             return;
         }
@@ -768,13 +768,12 @@ async function run() {
          */
         const matchersPath = path.join(__dirname, '..', '.github');
         console.log(`##[add-matcher]${path.join(matchersPath, 'phpcs-matcher.json')}`);
-        // run on complete files when they added or scope=files
         const scope = core.getInput('scope', { required: true });
-        if (files.added.length || scope === 'files')
-            run_on_files_1.runOnCompleteFiles(scope === 'files' ? [...files.added, ...files.modified] : files.added);
-        if (files.modified.length && ['blame', 'diff'].includes(scope)) {
-            // run on diff
-            await run_on_diff_1.runOnDiff(files.modified, scope);
+        if (scope === 'files') {
+            run_on_files_1.runOnCompleteFiles(files);
+        }
+        else {
+            await run_on_diff_1.runOnDiff(files, scope);
         }
     }
     catch (error) {
@@ -1325,7 +1324,7 @@ function runOnCompleteFiles(files) {
         args.push('--runtime-set ignore_warnings_on_exit 1');
     }
     try {
-        child_process_1.execSync(`${phpcs} ${args.join(' ')} ${files.join(' ')}`, {
+        child_process_1.execSync(`${phpcs} ${args.join(' ')} ${Array.from(files.keys()).join(' ')}`, {
             stdio: 'inherit',
             timeout: 20000,
         });
@@ -4768,13 +4767,13 @@ const path = __importStar(__webpack_require__(622));
 const core = __importStar(__webpack_require__(470));
 const github = __importStar(__webpack_require__(469));
 async function runOnDiff(files, scope) {
-    var _a;
     try {
         const options = {};
         const standard = core.getInput('standard');
         if (standard)
             options.standard = standard;
-        const lintResults = await php_codesniffer_1.lint(files, core.getInput('phpcs_path', { required: true }), options);
+        const fileList = Array.from(files.keys());
+        const lintResults = await php_codesniffer_1.lint(fileList, core.getInput('phpcs_path', { required: true }), options);
         const dontFailOnWarning = core.getInput('fail_on_warnings') == 'false' ||
             core.getInput('fail_on_warnings') === 'off';
         if (!lintResults.totals.errors) {
@@ -4793,28 +4792,39 @@ async function runOnDiff(files, scope) {
             authorEmail = child_process_1.execFileSync('git', ['--no-pager', 'log', '--format=%ae', `${github.context.sha}^!`], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
             console.log('PR author email: %s', authorEmail);
         }
+        let failed = false;
+        console.log('<?xml version="1.0" encoding="UTF-8"?>');
+        console.log('<checkstyle version="3.13.2">');
+        const errors = new Map();
         for (const [file, results] of Object.entries(lintResults.files)) {
-            const blameMap = await git_blame_json_1.blame(file);
-            let headerPrinted = false;
-            for (const message of results.messages) {
-                if (!isScopeBlame ||
-                    ((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === authorEmail) {
-                    // that's our line
-                    // we simulate checkstyle output to be picked up by problem matched
-                    if (!headerPrinted) {
-                        console.log(`<file name="${path.relative(process.cwd(), file)}">`);
-                        headerPrinted = true;
-                    }
-                    // output the problem
-                    console.log('<error line="%d" column="%d" severity="%s" message="%s" source="%s"/>', message.line, message.column, message.type.toLowerCase(), message.message, message.source);
-                    // fail
-                    if (message.type === 'WARNING' && !dontFailOnWarning)
-                        core.setFailed(message.message);
-                    else if (message.type === 'ERROR')
-                        core.setFailed(message.message);
-                }
+            let errorsInFile = [];
+            const relativeFilePath = path.relative(process.cwd(), file);
+            switch (scope) {
+                case 'blame':
+                    errorsInFile = await filterByBlame(results, file, authorEmail);
+                    break;
+                case 'diff':
+                    errorsInFile = await filterByDiff(results, files.get(relativeFilePath));
+                    break;
+            }
+            if (errorsInFile.length) {
+                errors.set(relativeFilePath, errorsInFile);
             }
         }
+        for (const [file, messages] of errors.entries()) {
+            console.log(`<file name="${file}">`);
+            for (const message of messages) {
+                console.log(' <error line="%d" column="%d" severity="%s" message="%s" source="%s"/>', message.line, message.column, message.type.toLowerCase(), message.message, message.source);
+                if (message.type === 'WARNING' && !dontFailOnWarning)
+                    failed = true;
+                else if (message.type === 'ERROR')
+                    failed = true;
+            }
+            console.log('</file>');
+        }
+        console.log('</checkstyle>');
+        if (failed)
+            core.setFailed(`PHPCS on ${scope} failed`);
     }
     catch (err) {
         core.debug(err);
@@ -4822,6 +4832,38 @@ async function runOnDiff(files, scope) {
     }
 }
 exports.runOnDiff = runOnDiff;
+async function filterByBlame(results, file, author) {
+    var _a;
+    const blameMap = await git_blame_json_1.blame(file);
+    const errorsInFile = [];
+    for (const message of results.messages) {
+        if (((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === author) {
+            errorsInFile.push({
+                line: message.line,
+                column: message.column,
+                type: message.type,
+                source: message.source,
+                message: message.message,
+            });
+        }
+    }
+    return errorsInFile;
+}
+async function filterByDiff(results, fileDiffLines) {
+    const errorsInFile = [];
+    for (const message of results.messages) {
+        if (fileDiffLines.has(message.line)) {
+            errorsInFile.push({
+                line: message.line,
+                column: message.column,
+                type: message.type,
+                source: message.source,
+                message: message.message,
+            });
+        }
+    }
+    return errorsInFile;
+}
 
 
 /***/ }),
@@ -5906,6 +5948,15 @@ function replace(input, re, value) {
     return re.reduce(function (input, re) { return input.replace(re, value); }, input);
 }
 //# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 557:
+/***/ (function(module) {
+
+"use strict";
+function _typeof(obj){"@babel/helpers - typeof";return _typeof="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(obj){return typeof obj}:function(obj){return obj&&"function"==typeof Symbol&&obj.constructor===Symbol&&obj!==Symbol.prototype?"symbol":typeof obj},_typeof(obj)}function _createForOfIteratorHelper(o,allowArrayLike){var it=typeof Symbol!=="undefined"&&o[Symbol.iterator]||o["@@iterator"];if(!it){if(Array.isArray(o)||(it=_unsupportedIterableToArray(o))||allowArrayLike&&o&&typeof o.length==="number"){if(it)o=it;var i=0;var F=function F(){};return{s:F,n:function n(){if(i>=o.length)return{done:true};return{done:false,value:o[i++]}},e:function e(_e2){throw _e2},f:F}}throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}var normalCompletion=true,didErr=false,err;return{s:function s(){it=it.call(o)},n:function n(){var step=it.next();normalCompletion=step.done;return step},e:function e(_e3){didErr=true;err=_e3},f:function f(){try{if(!normalCompletion&&it["return"]!=null)it["return"]()}finally{if(didErr)throw err}}}}function _defineProperty(obj,key,value){key=_toPropertyKey(key);if(key in obj){Object.defineProperty(obj,key,{value:value,enumerable:true,configurable:true,writable:true})}else{obj[key]=value}return obj}function _toPropertyKey(arg){var key=_toPrimitive(arg,"string");return _typeof(key)==="symbol"?key:String(key)}function _toPrimitive(input,hint){if(_typeof(input)!=="object"||input===null)return input;var prim=input[Symbol.toPrimitive];if(prim!==undefined){var res=prim.call(input,hint||"default");if(_typeof(res)!=="object")return res;throw new TypeError("@@toPrimitive must return a primitive value.")}return(hint==="string"?String:Number)(input)}function _slicedToArray(arr,i){return _arrayWithHoles(arr)||_iterableToArrayLimit(arr,i)||_unsupportedIterableToArray(arr,i)||_nonIterableRest()}function _nonIterableRest(){throw new TypeError("Invalid attempt to destructure non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}function _unsupportedIterableToArray(o,minLen){if(!o)return;if(typeof o==="string")return _arrayLikeToArray(o,minLen);var n=Object.prototype.toString.call(o).slice(8,-1);if(n==="Object"&&o.constructor)n=o.constructor.name;if(n==="Map"||n==="Set")return Array.from(o);if(n==="Arguments"||/^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n))return _arrayLikeToArray(o,minLen)}function _arrayLikeToArray(arr,len){if(len==null||len>arr.length)len=arr.length;for(var i=0,arr2=new Array(len);i<len;i++){arr2[i]=arr[i]}return arr2}function _iterableToArrayLimit(arr,i){var _i=null==arr?null:"undefined"!=typeof Symbol&&arr[Symbol.iterator]||arr["@@iterator"];if(null!=_i){var _s,_e,_x,_r,_arr=[],_n=!0,_d=!1;try{if(_x=(_i=_i.call(arr)).next,0===i){if(Object(_i)!==_i)return;_n=!1}else for(;!(_n=(_s=_x.call(_i)).done)&&(_arr.push(_s.value),_arr.length!==i);_n=!0){;}}catch(err){_d=!0,_e=err}finally{try{if(!_n&&null!=_i["return"]&&(_r=_i["return"](),Object(_r)!==_r))return}finally{if(_d)throw _e}}return _arr}}function _arrayWithHoles(arr){if(Array.isArray(arr))return arr}module.exports=function(input){if(!input)return[];if(typeof input!=="string"||input.match(/^\s+$/))return[];var lines=input.split("\n");if(lines.length===0)return[];var files=[];var currentFile=null;var currentChunk=null;var deletedLineCounter=0;var addedLineCounter=0;var currentFileChanges=null;var normal=function normal(line){var _currentChunk;(_currentChunk=currentChunk)===null||_currentChunk===void 0?void 0:_currentChunk.changes.push({type:"normal",normal:true,ln1:deletedLineCounter++,ln2:addedLineCounter++,content:line});currentFileChanges.oldLines--;currentFileChanges.newLines--};var start=function start(line){var _parseFiles;var _ref=(_parseFiles=parseFiles(line))!==null&&_parseFiles!==void 0?_parseFiles:[],_ref2=_slicedToArray(_ref,2),fromFileName=_ref2[0],toFileName=_ref2[1];currentFile={chunks:[],deletions:0,additions:0,from:fromFileName,to:toFileName};files.push(currentFile)};var restart=function restart(){if(!currentFile||currentFile.chunks.length)start()};var newFile=function newFile(_,match){restart();currentFile["new"]=true;currentFile.newMode=match[1];currentFile.from="/dev/null"};var deletedFile=function deletedFile(_,match){restart();currentFile.deleted=true;currentFile.oldMode=match[1];currentFile.to="/dev/null"};var oldMode=function oldMode(_,match){restart();currentFile.oldMode=match[1]};var newMode=function newMode(_,match){restart();currentFile.newMode=match[1]};var index=function index(line,match){restart();currentFile.index=line.split(" ").slice(1);if(match[1]){currentFile.oldMode=currentFile.newMode=match[1].trim()}};var fromFile=function fromFile(line){restart();currentFile.from=parseOldOrNewFile(line)};var toFile=function toFile(line){restart();currentFile.to=parseOldOrNewFile(line)};var toNumOfLines=function toNumOfLines(number){return+(number||1)};var chunk=function chunk(line,match){if(!currentFile){start(line)}var _match$slice=match.slice(1),_match$slice2=_slicedToArray(_match$slice,4),oldStart=_match$slice2[0],oldNumLines=_match$slice2[1],newStart=_match$slice2[2],newNumLines=_match$slice2[3];deletedLineCounter=+oldStart;addedLineCounter=+newStart;currentChunk={content:line,changes:[],oldStart:+oldStart,oldLines:toNumOfLines(oldNumLines),newStart:+newStart,newLines:toNumOfLines(newNumLines)};currentFileChanges={oldLines:toNumOfLines(oldNumLines),newLines:toNumOfLines(newNumLines)};currentFile.chunks.push(currentChunk)};var del=function del(line){if(!currentChunk)return;currentChunk.changes.push({type:"del",del:true,ln:deletedLineCounter++,content:line});currentFile.deletions++;currentFileChanges.oldLines--};var add=function add(line){if(!currentChunk)return;currentChunk.changes.push({type:"add",add:true,ln:addedLineCounter++,content:line});currentFile.additions++;currentFileChanges.newLines--};var eof=function eof(line){var _currentChunk$changes3;if(!currentChunk)return;var _currentChunk$changes=currentChunk.changes.slice(-1),_currentChunk$changes2=_slicedToArray(_currentChunk$changes,1),mostRecentChange=_currentChunk$changes2[0];currentChunk.changes.push((_currentChunk$changes3={type:mostRecentChange.type},_defineProperty(_currentChunk$changes3,mostRecentChange.type,true),_defineProperty(_currentChunk$changes3,"ln1",mostRecentChange.ln1),_defineProperty(_currentChunk$changes3,"ln2",mostRecentChange.ln2),_defineProperty(_currentChunk$changes3,"ln",mostRecentChange.ln),_defineProperty(_currentChunk$changes3,"content",line),_currentChunk$changes3))};var schemaHeaders=[[/^diff\s/,start],[/^new file mode (\d+)$/,newFile],[/^deleted file mode (\d+)$/,deletedFile],[/^old mode (\d+)$/,oldMode],[/^new mode (\d+)$/,newMode],[/^index\s[\da-zA-Z]+\.\.[\da-zA-Z]+(\s(\d+))?$/,index],[/^---\s/,fromFile],[/^\+\+\+\s/,toFile],[/^@@\s+-(\d+),?(\d+)?\s+\+(\d+),?(\d+)?\s@@/,chunk],[/^\\ No newline at end of file$/,eof]];var schemaContent=[[/^\\ No newline at end of file$/,eof],[/^-/,del],[/^\+/,add],[/^\s+/,normal]];var parseContentLine=function parseContentLine(line){for(var _i2=0,_schemaContent=schemaContent;_i2<_schemaContent.length;_i2++){var _schemaContent$_i=_slicedToArray(_schemaContent[_i2],2),pattern=_schemaContent$_i[0],handler=_schemaContent$_i[1];var match=line.match(pattern);if(match){handler(line,match);break}}if(currentFileChanges.oldLines===0&&currentFileChanges.newLines===0){currentFileChanges=null}};var parseHeaderLine=function parseHeaderLine(line){for(var _i3=0,_schemaHeaders=schemaHeaders;_i3<_schemaHeaders.length;_i3++){var _schemaHeaders$_i=_slicedToArray(_schemaHeaders[_i3],2),pattern=_schemaHeaders$_i[0],handler=_schemaHeaders$_i[1];var match=line.match(pattern);if(match){handler(line,match);break}}};var parseLine=function parseLine(line){if(currentFileChanges){parseContentLine(line)}else{parseHeaderLine(line)}return};var _iterator=_createForOfIteratorHelper(lines),_step;try{for(_iterator.s();!(_step=_iterator.n()).done;){var line=_step.value;parseLine(line)}}catch(err){_iterator.e(err)}finally{_iterator.f()}return files};var fileNameDiffRegex=/(a|i|w|c|o|1|2)\/.*(?=["']? ["']?(b|i|w|c|o|1|2)\/)|(b|i|w|c|o|1|2)\/.*$/g;var gitFileHeaderRegex=/^(a|b|i|w|c|o|1|2)\//;var parseFiles=function parseFiles(line){var fileNames=line===null||line===void 0?void 0:line.match(fileNameDiffRegex);return fileNames===null||fileNames===void 0?void 0:fileNames.map(function(fileName){return fileName.replace(gitFileHeaderRegex,"").replace(/("|')$/,"")})};var qoutedFileNameRegex=/^\\?['"]|\\?['"]$/g;var parseOldOrNewFile=function parseOldOrNewFile(line){var fileName=leftTrimChars(line,"-+").trim();fileName=removeTimeStamp(fileName);return fileName.replace(qoutedFileNameRegex,"").replace(gitFileHeaderRegex,"")};var leftTrimChars=function leftTrimChars(string,trimmingChars){string=makeString(string);if(!trimmingChars&&String.prototype.trimLeft)return string.trimLeft();var trimmingString=formTrimmingString(trimmingChars);return string.replace(new RegExp("^".concat(trimmingString,"+")),"")};var timeStampRegex=/\t.*|\d{4}-\d\d-\d\d\s\d\d:\d\d:\d\d(.\d+)?\s(\+|-)\d\d\d\d/;var removeTimeStamp=function removeTimeStamp(string){var timeStamp=timeStampRegex.exec(string);if(timeStamp){string=string.substring(0,timeStamp.index).trim()}return string};var formTrimmingString=function formTrimmingString(trimmingChars){if(trimmingChars===null||trimmingChars===undefined)return"\\s";else if(trimmingChars instanceof RegExp)return trimmingChars.source;return"[".concat(makeString(trimmingChars).replace(/([.*+?^=!:${}()|[\]/\\])/g,"\\$1"),"]")};var makeString=function makeString(itemToConvert){return(itemToConvert!==null&&itemToConvert!==void 0?itemToConvert:"")+""};
+
 
 /***/ }),
 
@@ -8781,9 +8832,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getChangedFiles = void 0;
-const child_process_1 = __webpack_require__(129);
-const readline_1 = __webpack_require__(58);
 const fs_1 = __webpack_require__(747);
+const child_process_1 = __webpack_require__(129);
+const parse_diff_1 = __importDefault(__webpack_require__(557));
 const core = __importStar(__webpack_require__(470));
 const github = __importStar(__webpack_require__(469));
 const picomatch_1 = __importDefault(__webpack_require__(827));
@@ -8796,57 +8847,33 @@ async function getChangedFiles() {
     console.log('Filter patterns:', globs, isMatch('src/test.php'));
     const payload = github.context
         .payload;
-    /*
-      getting them from Git
-      git diff-tree --no-commit-id --name-status --diff-filter=d -r ${{ github.event.pull_request.base.sha }}..${{ github.event.after }}
-    */
+    const result = new Map();
     try {
-        const git = child_process_1.spawn('git', [
-            '--no-pager',
-            'diff-tree',
-            '--no-commit-id',
-            '--name-status',
-            '--diff-filter=d',
-            '-r',
-            `${payload.pull_request.base.sha}..`,
-        ], {
-            windowsHide: true,
-            timeout: 5000,
+        const diffText = child_process_1.execSync(`git diff --unified=0 ${payload.pull_request.base.sha}..`, {
+            encoding: 'utf-8'
         });
-        const readline = readline_1.createInterface({
-            input: git.stdout,
-        });
-        const result = {
-            added: [],
-            modified: [],
-        };
-        for await (const line of readline) {
-            const parsed = /^(?<status>[ACMR])[\s\t]+(?<file>\S+)$/.exec(line);
-            if (parsed === null || parsed === void 0 ? void 0 : parsed.groups) {
-                const { status, file } = parsed.groups;
-                // ensure file exists
-                if (isMatch(file) && fs_1.existsSync(file)) {
-                    switch (status) {
-                        case 'A':
-                        case 'C':
-                        case 'R':
-                            result.added.push(file);
-                            break;
-                        case 'M':
-                            result.modified.push(file);
+        const files = parse_diff_1.default(diffText);
+        for (const file of files) {
+            if (file.deleted || !isMatch(file.to) || !fs_1.existsSync(file.to))
+                continue;
+            const changed = new Set();
+            for (const hunk of file.chunks) {
+                for (const line of hunk.changes) {
+                    if (line.type === 'add') {
+                        changed.add(line.ln);
+                    }
+                    if (line.type === 'normal') {
+                        changed.add(line.ln2);
                     }
                 }
             }
+            result.set(file.to, changed);
         }
-        return result;
     }
     catch (err) {
         console.error(err);
-        return {
-            added: [],
-            modified: [],
-        };
     }
+    return result;
 }
 exports.getChangedFiles = getChangedFiles;
 

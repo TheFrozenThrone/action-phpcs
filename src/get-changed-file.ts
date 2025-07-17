@@ -1,18 +1,13 @@
-import { spawn } from 'child_process';
-import { createInterface } from 'readline';
 import { existsSync } from 'fs';
+import { execSync } from 'child_process';
+import parseDiff, { File as DiffFile } from 'parse-diff';
 
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as Webhooks from '@octokit/webhooks';
 import picomatch from 'picomatch';
 
-interface ChangedFiles {
-  added: string[];
-  modified: string[];
-}
-
-export async function getChangedFiles(): Promise<ChangedFiles> {
+export async function getChangedFiles(): Promise<Map<string, Set<number>>> {
   const pattern = core.getInput('files', {
     required: false,
   });
@@ -22,59 +17,34 @@ export async function getChangedFiles(): Promise<ChangedFiles> {
   const payload = github.context
     .payload as Webhooks.EventPayloads.WebhookPayloadPullRequest;
 
-  /*
-    getting them from Git
-    git diff-tree --no-commit-id --name-status --diff-filter=d -r ${{ github.event.pull_request.base.sha }}..${{ github.event.after }}
-  */
+  const result = new Map<string, Set<number>>();
   try {
-    const git = spawn(
-      'git',
-      [
-        '--no-pager',
-        'diff-tree',
-        '--no-commit-id',
-        '--name-status',
-        '--diff-filter=d', // we don't need deleted files
-        '-r',
-        `${payload.pull_request.base.sha}..`,
-      ],
+    const diffText = execSync(
+      `git diff --unified=0 ${payload.pull_request.base.sha}..`,
       {
-        windowsHide: true,
-        timeout: 5000,
+        encoding: 'utf-8',
       }
     );
-    const readline = createInterface({
-      input: git.stdout,
-    });
-    const result: ChangedFiles = {
-      added: [],
-      modified: [],
-    };
-    for await (const line of readline) {
-      const parsed = /^(?<status>[ACMR])[\s\t]+(?<file>\S+)$/.exec(line);
-      if (parsed?.groups) {
-        const { status, file } = parsed.groups;
-        // ensure file exists
-        if (isMatch(file) && existsSync(file)) {
-          switch (status) {
-            case 'A':
-            case 'C':
-            case 'R':
-              result.added.push(file);
-              break;
 
-            case 'M':
-              result.modified.push(file);
+    const files: DiffFile[] = parseDiff(diffText);
+
+    for (const file of files) {
+      if (file.deleted || !isMatch(file.to!) || !existsSync(file.to!)) continue;
+      const changed = new Set<number>();
+      for (const hunk of file.chunks) {
+        for (const line of hunk.changes) {
+          if (line.type === 'add') {
+            changed.add(line.ln);
+          }
+          if (line.type === 'normal') {
+            changed.add(line.ln2);
           }
         }
       }
+      result.set(file.to!, changed);
     }
-    return result;
   } catch (err) {
     console.error(err);
-    return {
-      added: [],
-      modified: [],
-    };
   }
+  return result;
 }

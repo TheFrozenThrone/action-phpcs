@@ -5,7 +5,7 @@ import * as core from '@actions/core';
  * Executes phpcs on whole files and let's errors to be picked by problem matcher
  * @param files
  */
-export function runOnCompleteFiles(files: string[]): number {
+export function runOnCompleteFiles(files: Map<string, Set<number>>): number {
   const phpcs = core.getInput('phpcs_path', { required: true });
   const args = ['--report=checkstyle'];
 
@@ -18,10 +18,13 @@ export function runOnCompleteFiles(files: string[]): number {
   }
 
   try {
-    execSync(`${phpcs} ${args.join(' ')} ${files.join(' ')}`, {
-      stdio: 'inherit',
-      timeout: 20000,
-    });
+    execSync(
+      `${phpcs} ${args.join(' ')} ${Array.from(files.keys()).join(' ')}`,
+      {
+        stdio: 'inherit',
+        timeout: 20000,
+      }
+    );
     return 0;
   } catch (err) {
     core.debug(err);

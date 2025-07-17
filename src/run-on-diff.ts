@@ -4,16 +4,44 @@ import { blame } from 'git-blame-json';
 import * as path from 'path';
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import * as Webhooks from '@octokit/webhooks';
 
-export async function runOnDiff(files: string[], scope: string): Promise<void> {
+interface PHPCSMessage {
+  line: number;
+  column: number;
+  type: 'ERROR' | 'WARNING';
+  message: string;
+  source: string;
+}
+
+interface LinterMessage {
+  message: string;
+  source: string;
+  severity: number;
+  fixable: boolean;
+  type: 'ERROR' | 'WARNING';
+  line: number;
+  column: number;
+}
+
+interface LintResultFiles {
+  errors: number;
+  warnings: number;
+  messages: LinterMessage[];
+}
+
+export async function runOnDiff(
+  files: Map<string, Set<number>>,
+  scope: string
+): Promise<void> {
   try {
     const options: Record<string, string> = {};
     const standard = core.getInput('standard');
     if (standard) options.standard = standard;
 
+    const fileList = Array.from(files.keys());
+
     const lintResults = await lint(
-      files,
+      fileList,
       core.getInput('phpcs_path', { required: true }),
       options
     );
@@ -42,38 +70,95 @@ export async function runOnDiff(files: string[], scope: string): Promise<void> {
       console.log('PR author email: %s', authorEmail);
     }
 
+    let failed = false;
+
+    console.log('<?xml version="1.0" encoding="UTF-8"?>');
+    console.log('<checkstyle version="3.13.2">');
+    const errors = new Map<string, PHPCSMessage[]>();
     for (const [file, results] of Object.entries(lintResults.files)) {
-      const blameMap = await blame(file);
-      let headerPrinted = false;
-      for (const message of results.messages) {
-        if (
-          !isScopeBlame ||
-          blameMap.get(message.line)?.authorMail === authorEmail
-        ) {
-          // that's our line
-          // we simulate checkstyle output to be picked up by problem matched
-          if (!headerPrinted) {
-            console.log(`<file name="${path.relative(process.cwd(), file)}">`);
-            headerPrinted = true;
-          }
-          // output the problem
-          console.log(
-            '<error line="%d" column="%d" severity="%s" message="%s" source="%s"/>',
-            message.line,
-            message.column,
-            message.type.toLowerCase(),
-            message.message,
-            message.source
+      let errorsInFile: PHPCSMessage[] = [];
+      const relativeFilePath = path.relative(process.cwd(), file);
+      switch (scope) {
+        case 'blame':
+          errorsInFile = await filterByBlame(results, file, authorEmail!);
+          break;
+        case 'diff':
+          errorsInFile = await filterByDiff(
+            results,
+            files.get(relativeFilePath)!
           );
-          // fail
-          if (message.type === 'WARNING' && !dontFailOnWarning)
-            core.setFailed(message.message);
-          else if (message.type === 'ERROR') core.setFailed(message.message);
-        }
+          break;
+      }
+
+      if (errorsInFile.length) {
+        errors.set(relativeFilePath, errorsInFile);
       }
     }
+
+    for (const [file, messages] of errors.entries()) {
+      console.log(`<file name="${file}">`);
+      for (const message of messages) {
+        console.log(
+          ' <error line="%d" column="%d" severity="%s" message="%s" source="%s"/>',
+          message.line,
+          message.column,
+          message.type.toLowerCase(),
+          message.message,
+          message.source
+        );
+
+        if (message.type === 'WARNING' && !dontFailOnWarning) failed = true;
+        else if (message.type === 'ERROR') failed = true;
+      }
+      console.log('</file>');
+    }
+
+    console.log('</checkstyle>');
+    if (failed) core.setFailed(`PHPCS on ${scope} failed`);
   } catch (err) {
     core.debug(err);
     core.setFailed(err);
   }
+}
+
+async function filterByBlame(
+  results: LintResultFiles,
+  file: string,
+  author: string
+): Promise<PHPCSMessage[]> {
+  const blameMap = await blame(file);
+  const errorsInFile: PHPCSMessage[] = [];
+  for (const message of results.messages) {
+    if (blameMap.get(message.line)?.authorMail === author) {
+      errorsInFile.push({
+        line: message.line,
+        column: message.column,
+        type: message.type,
+        source: message.source,
+        message: message.message,
+      });
+    }
+  }
+
+  return errorsInFile;
+}
+
+async function filterByDiff(
+  results: LintResultFiles,
+  fileDiffLines: Set<number>
+): Promise<PHPCSMessage[]> {
+  const errorsInFile: PHPCSMessage[] = [];
+  for (const message of results.messages) {
+    if (fileDiffLines.has(message.line)) {
+      errorsInFile.push({
+        line: message.line,
+        column: message.column,
+        type: message.type,
+        source: message.source,
+        message: message.message,
+      });
+    }
+  }
+
+  return errorsInFile;
 }

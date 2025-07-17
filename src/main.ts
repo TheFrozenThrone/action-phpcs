@@ -7,8 +7,8 @@ import { runOnDiff } from './run-on-diff';
 async function run(): Promise<void> {
   try {
     const files = await getChangedFiles();
-    core.info(JSON.stringify(files, null, 2));
-    if (!files.added.length && !files.modified.length) {
+    core.info(JSON.stringify(Array.from(files.keys()), null, 2));
+    if (!files.size) {
       core.warning('No files to check, exiting...');
       return;
     }
@@ -22,16 +22,11 @@ async function run(): Promise<void> {
       `##[add-matcher]${path.join(matchersPath, 'phpcs-matcher.json')}`
     );
 
-    // run on complete files when they added or scope=files
     const scope = core.getInput('scope', { required: true });
-    if (files.added.length || scope === 'files')
-      runOnCompleteFiles(
-        scope === 'files' ? [...files.added, ...files.modified] : files.added
-      );
-
-    if (files.modified.length && ['blame', 'diff'].includes(scope)) {
-      // run on diff
-      await runOnDiff(files.modified, scope);
+    if (scope === 'files') {
+      runOnCompleteFiles(files);
+    } else {
+      await runOnDiff(files, scope);
     }
   } catch (error) {
     core.setFailed(error);
