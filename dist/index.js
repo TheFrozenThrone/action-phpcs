@@ -772,7 +772,7 @@ async function run() {
         const scope = core.getInput('scope', { required: true });
         if (files.added.length || scope === 'files')
             run_on_files_1.runOnCompleteFiles(scope === 'files' ? [...files.added, ...files.modified] : files.added);
-        else if (files.modified.length && ['blame', 'diff'].includes(scope)) {
+        if (files.modified.length && ['blame', 'diff'].includes(scope)) {
             // run on diff
             await run_on_diff_1.runOnDiff(files.modified, scope);
         }
@@ -4797,7 +4797,8 @@ async function runOnDiff(files, scope) {
             const blameMap = await git_blame_json_1.blame(file);
             let headerPrinted = false;
             for (const message of results.messages) {
-                if (!isScopeBlame || ((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === authorEmail) {
+                if (!isScopeBlame ||
+                    ((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === authorEmail) {
                     // that's our line
                     // we simulate checkstyle output to be picked up by problem matched
                     if (!headerPrinted) {
