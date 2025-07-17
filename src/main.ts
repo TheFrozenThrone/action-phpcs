@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as core from '@actions/core';
 import { getChangedFiles } from './get-changed-file';
 import { runOnCompleteFiles } from './run-on-files';
-import { runOnBlame } from './run-on-blame';
+import { runOnDiff } from './run-on-diff';
 
 async function run(): Promise<void> {
   try {
@@ -28,9 +28,9 @@ async function run(): Promise<void> {
       runOnCompleteFiles(
         scope === 'files' ? [...files.added, ...files.modified] : files.added
       );
-    else if (files.modified.length && scope === 'blame') {
-      // run on blame
-      await runOnBlame(files.modified);
+    else if (files.modified.length && ['blame', 'diff'].includes(scope)) {
+      // run on diff
+      await runOnDiff(files.modified, scope);
     }
   } catch (error) {
     core.setFailed(error);

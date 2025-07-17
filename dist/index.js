@@ -753,7 +753,7 @@ const path = __importStar(__webpack_require__(622));
 const core = __importStar(__webpack_require__(470));
 const get_changed_file_1 = __webpack_require__(942);
 const run_on_files_1 = __webpack_require__(303);
-const run_on_blame_1 = __webpack_require__(400);
+const run_on_diff_1 = __webpack_require__(522);
 async function run() {
     try {
         const files = await get_changed_file_1.getChangedFiles();
@@ -772,9 +772,9 @@ async function run() {
         const scope = core.getInput('scope', { required: true });
         if (files.added.length || scope === 'files')
             run_on_files_1.runOnCompleteFiles(scope === 'files' ? [...files.added, ...files.modified] : files.added);
-        else if (files.modified.length && scope === 'blame') {
-            // run on blame
-            await run_on_blame_1.runOnBlame(files.modified);
+        else if (files.modified.length && ['blame', 'diff'].includes(scope)) {
+            // run on diff
+            await run_on_diff_1.runOnDiff(files.modified, scope);
         }
     }
     catch (error) {
@@ -2079,92 +2079,6 @@ const endpoint = withDefaults(null, DEFAULTS);
 
 exports.endpoint = endpoint;
 //# sourceMappingURL=index.js.map
-
-
-/***/ }),
-
-/***/ 400:
-/***/ (function(__unusedmodule, exports, __webpack_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || function (mod) {
-    if (mod && mod.__esModule) return mod;
-    var result = {};
-    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
-    __setModuleDefault(result, mod);
-    return result;
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.runOnBlame = void 0;
-const php_codesniffer_1 = __webpack_require__(160);
-const child_process_1 = __webpack_require__(129);
-const git_blame_json_1 = __webpack_require__(5);
-const path = __importStar(__webpack_require__(622));
-const core = __importStar(__webpack_require__(470));
-const github = __importStar(__webpack_require__(469));
-async function runOnBlame(files) {
-    var _a;
-    try {
-        const options = {};
-        const standard = core.getInput('standard');
-        if (standard)
-            options.standard = standard;
-        const lintResults = await php_codesniffer_1.lint(files, core.getInput('phpcs_path', { required: true }), options);
-        const dontFailOnWarning = core.getInput('fail_on_warnings') == 'false' ||
-            core.getInput('fail_on_warnings') === 'off';
-        if (!lintResults.totals.errors) {
-            if (dontFailOnWarning)
-                return;
-            if (!lintResults.totals.warnings)
-                return;
-        }
-        // blame files and output relevant errors
-        // const payload = github.context
-        //   .payload as Webhooks.EventPayloads.WebhookPayloadPullRequest;
-        // get email of author of first commit in PR
-        const authorEmail = child_process_1.execFileSync('git', ['--no-pager', 'log', '--format=%ae', `${github.context.sha}^!`], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
-        console.log('PR author email: %s', authorEmail);
-        for (const [file, results] of Object.entries(lintResults.files)) {
-            const blameMap = await git_blame_json_1.blame(file);
-            let headerPrinted = false;
-            for (const message of results.messages) {
-                if (((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === authorEmail) {
-                    // that's our line
-                    // we simulate checkstyle output to be picked up by problem matched
-                    if (!headerPrinted) {
-                        console.log(`<file name="${path.relative(process.cwd(), file)}">`);
-                        headerPrinted = true;
-                    }
-                    // output the problem
-                    console.log('<error line="%d" column="%d" severity="%s" message="%s" source="%s"/>', message.line, message.column, message.type.toLowerCase(), message.message, message.source);
-                    // fail
-                    if (message.type === 'WARNING' && !dontFailOnWarning)
-                        core.setFailed(message.message);
-                    else if (message.type === 'ERROR')
-                        core.setFailed(message.message);
-                }
-            }
-        }
-    }
-    catch (err) {
-        core.debug(err);
-        core.setFailed(err);
-    }
-}
-exports.runOnBlame = runOnBlame;
 
 
 /***/ }),
@@ -4818,6 +4732,96 @@ function getOctokitOptions(token, options) {
 }
 exports.getOctokitOptions = getOctokitOptions;
 //# sourceMappingURL=utils.js.map
+
+/***/ }),
+
+/***/ 522:
+/***/ (function(__unusedmodule, exports, __webpack_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.runOnDiff = void 0;
+const php_codesniffer_1 = __webpack_require__(160);
+const child_process_1 = __webpack_require__(129);
+const git_blame_json_1 = __webpack_require__(5);
+const path = __importStar(__webpack_require__(622));
+const core = __importStar(__webpack_require__(470));
+const github = __importStar(__webpack_require__(469));
+async function runOnDiff(files, scope) {
+    var _a;
+    try {
+        const options = {};
+        const standard = core.getInput('standard');
+        if (standard)
+            options.standard = standard;
+        const lintResults = await php_codesniffer_1.lint(files, core.getInput('phpcs_path', { required: true }), options);
+        const dontFailOnWarning = core.getInput('fail_on_warnings') == 'false' ||
+            core.getInput('fail_on_warnings') === 'off';
+        if (!lintResults.totals.errors) {
+            if (dontFailOnWarning)
+                return;
+            if (!lintResults.totals.warnings)
+                return;
+        }
+        let authorEmail = null;
+        const isScopeBlame = scope === 'blame';
+        if (isScopeBlame) {
+            // blame files and output relevant errors
+            // const payload = github.context
+            //   .payload as Webhooks.EventPayloads.WebhookPayloadPullRequest;
+            // get email of author of first commit in PR
+            authorEmail = child_process_1.execFileSync('git', ['--no-pager', 'log', '--format=%ae', `${github.context.sha}^!`], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim();
+            console.log('PR author email: %s', authorEmail);
+        }
+        for (const [file, results] of Object.entries(lintResults.files)) {
+            const blameMap = await git_blame_json_1.blame(file);
+            let headerPrinted = false;
+            for (const message of results.messages) {
+                if (!isScopeBlame || ((_a = blameMap.get(message.line)) === null || _a === void 0 ? void 0 : _a.authorMail) === authorEmail) {
+                    // that's our line
+                    // we simulate checkstyle output to be picked up by problem matched
+                    if (!headerPrinted) {
+                        console.log(`<file name="${path.relative(process.cwd(), file)}">`);
+                        headerPrinted = true;
+                    }
+                    // output the problem
+                    console.log('<error line="%d" column="%d" severity="%s" message="%s" source="%s"/>', message.line, message.column, message.type.toLowerCase(), message.message, message.source);
+                    // fail
+                    if (message.type === 'WARNING' && !dontFailOnWarning)
+                        core.setFailed(message.message);
+                    else if (message.type === 'ERROR')
+                        core.setFailed(message.message);
+                }
+            }
+        }
+    }
+    catch (err) {
+        core.debug(err);
+        core.setFailed(err);
+    }
+}
+exports.runOnDiff = runOnDiff;
+
 
 /***/ }),
 

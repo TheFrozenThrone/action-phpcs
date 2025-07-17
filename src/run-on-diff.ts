@@ -6,7 +6,7 @@ import * as core from '@actions/core';
 import * as github from '@actions/github';
 import * as Webhooks from '@octokit/webhooks';
 
-export async function runOnBlame(files: string[]): Promise<void> {
+export async function runOnDiff(files: string[], scope: string): Promise<void> {
   try {
     const options: Record<string, string> = {};
     const standard = core.getInput('standard');
@@ -26,22 +26,30 @@ export async function runOnBlame(files: string[]): Promise<void> {
       if (!lintResults.totals.warnings) return;
     }
 
-    // blame files and output relevant errors
-    // const payload = github.context
-    //   .payload as Webhooks.EventPayloads.WebhookPayloadPullRequest;
-    // get email of author of first commit in PR
-    const authorEmail = execFileSync(
-      'git',
-      ['--no-pager', 'log', '--format=%ae', `${github.context.sha}^!`],
-      { encoding: 'utf8', windowsHide: true, timeout: 5000 }
-    ).trim();
-    console.log('PR author email: %s', authorEmail);
+    let authorEmail = null;
+
+    const isScopeBlame = scope === 'blame';
+    if (isScopeBlame) {
+      // blame files and output relevant errors
+      // const payload = github.context
+      //   .payload as Webhooks.EventPayloads.WebhookPayloadPullRequest;
+      // get email of author of first commit in PR
+      authorEmail = execFileSync(
+        'git',
+        ['--no-pager', 'log', '--format=%ae', `${github.context.sha}^!`],
+        { encoding: 'utf8', windowsHide: true, timeout: 5000 }
+      ).trim();
+      console.log('PR author email: %s', authorEmail);
+    }
 
     for (const [file, results] of Object.entries(lintResults.files)) {
       const blameMap = await blame(file);
       let headerPrinted = false;
       for (const message of results.messages) {
-        if (blameMap.get(message.line)?.authorMail === authorEmail) {
+        if (
+          !isScopeBlame ||
+          blameMap.get(message.line)?.authorMail === authorEmail
+        ) {
           // that's our line
           // we simulate checkstyle output to be picked up by problem matched
           if (!headerPrinted) {
